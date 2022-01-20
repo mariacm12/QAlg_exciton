@@ -38,18 +38,27 @@ class GA:
                  mutation_range=[],
                  prev_result=None,
                  alt_sign=False,
-                 k_tournament=None):
+                 k_tournament=None,
+                 filename="ga",
+                 parallelize=False):
 
+        # A function that takes the population as input and outputs the fitness
         self.fitness_func = fitness_fn
+        
+        # N of generations
         self.num_generations = num_generations
+        # How many types of chromosomes to consider 
+        #  (e.g., when we want the range of different groups of chromosomes to be different)
         self.gene_groups = gene_groups
+        # N of chromosoms, i.e., the size of the population
         self.num_chroms = num_chromosomes
-
-        # Initialize populations
-        self.gene_groups = gene_groups
+        # N of genes per gene_type. Takes a list when gene_groups>1
         self.num_genes = num_genes
         
+        
+        # Population from a previous run, if any, as a numpy array.
         self.prev_result = prev_result
+        
         
         # Making sure variables are input correctly
         if gene_groups > 1:
@@ -59,8 +68,10 @@ class GA:
             elif len(num_genes) != gene_groups:
                 raise ValueError(("If one more Gene Group is desired, the size for each group must be specified as a list of size gene_groups."+
                                  "\nThe size of num_genes doesn't correspond to gene_groups."))
+                
+            # alt_sign is set to True when we want the sign on the gene to be randomly chosen (e.g., for angles)
             if not isinstance(alt_sign,list):
-                alt_sign = [alt_sign] * gene_groups
+                alt_sign = [alt_sign] * gene_groups # a single boolean is given as input
                 
             if not isinstance(gene_min,list) or not isinstance(gene_max,list):
                 raise ValueError(("If one more Gene Group is desired, the min and max limits should be provided as lists of size gene_groups."+
@@ -68,8 +79,6 @@ class GA:
             elif len(gene_min) != gene_groups or len(gene_max) != gene_groups:
                 raise ValueError("If one more Gene Group is desired, the min and max limits should be provided as lists of size gene_groups."+
                                  "\nOne of the lists (or both) isn't of length gene_groups.")                
-
-        self.cols = list(string.ascii_uppercase)[:self.gene_groups]
         
         if self.prev_result is None:
             pop = self.initialize_population(gene_min, gene_max, alt_sign)
@@ -96,7 +105,7 @@ class GA:
 
         self.keep_parents = keep_parents
         if self.num_chroms < self.keep_parents:
-            raise ValueError("THe number of parents to keep (keep_parents) cannot be larger than the number of chromosomes.") 
+            raise ValueError("The number of parents to keep (keep_parents) cannot be larger than the number of chromosomes.") 
 
         # From original code
         if (self.keep_parents == -1):  # Keep all parents in the next population.
@@ -108,16 +117,37 @@ class GA:
         elif (self.keep_parents > 0):  # Keep the specified number of parents in the next population.
             # self.num_offspring = np.array([self.num_chroms] * self.gene_groups) - self.keep_parents
             self.num_offspring = self.num_chroms - self.keep_parents
-
+            
+        # How to run through gene types
+        self.run_fn = sequential_dataframe
+        if parallelize:
+            self.run_fn = parallelize_dataframe
+            
         self.best_solution = []
         self.conv = False
+        
+        self.filename = filename
         ###
 
 
     def initialize_population(self, low, high, alt_sign):
         """
         Creates an initial population randomly as a NumPy array.
+
+        Parameters
+        ----------
+        low, high : The range of values to initialize the population from.
+            If gene_groups>1, both are lists. 
+        alt_sign : Whether to choose the sign of the genes randomly. 
+            If gene_groups>1, it takes a list.
+
+        Returns
+        -------
+        pops : Population as a Pandas DataFrame
+
         """
+        # array of uppercase letters to assign as column names
+        cols = list(string.ascii_uppercase)[:self.gene_groups]
         pop = np.empty((self.num_chroms,0))
         col = []
         if self.gene_groups > 1:
@@ -130,8 +160,8 @@ class GA:
                 if alt_sign[i]: 
                     pop_i *= np.random.choice([-1,1], size_i, p=[0.5,0.5])   
                 pop = np.hstack((pop, pop_i))
-                col += (list(self.cols[i]*self.num_genes[i]))
-                
+                col += (list(cols[i]*self.num_genes[i]))
+                 
         else:
             pop_size = (self.num_chroms, self.num_genes)
             pop = np.random.uniform(low=low, high=high, size=pop_size)
@@ -144,15 +174,28 @@ class GA:
         """
         Initializes the population from a result from a previous run. 
         Chromosome 1 corresponds to stored result, the rest are initialize randomly.
+
+        Parameters
+        ----------
+        low, high : The range of values to initialize the population from.
+            If gene_groups>1, both are lists. 
+        alt_sign : Whether to choose the sign of the genes randomly. 
+            If gene_groups>1, it takes a list.
+
+        Returns
+        -------
+        pops : Population as a Pandas DataFrame
+
         """
-        pop_size = []
-        pop = []
+        # array of uppercase letters to assign as column names
+        cols = list(string.ascii_uppercase)[:self.gene_groups]
+        pop = np.empty((self.num_chroms,0))
         
         # separation previous result (as 1D array) by gene type
         if self.gene_groups > 1:
             prev = [0]*self.gene_groups
             idx_0 = 0
-
+            col = []
             for i in range(self.gene_groups):
                 # get prev slice corresponding to current gene group
                 idx_i = self.num_genes[i]
@@ -167,8 +210,8 @@ class GA:
                     rdm_chrom *= np.random.choice([-1,1], size_rdm, p=[0.5,0.5])
                     
                 pop_i = np.concatenate((prev[i], rdm_chrom), axis=0)
-                pop.append(pop_i)
-                pop_size.append((self.num_chroms, self.num_genes[i]))
+                pop = np.hstack((pop, pop_i))
+                col += (list(cols[i]*self.num_genes[i]))
                 
         else:
             size_rdm = (self.num_chroms - 1, self.num_genes[i])
@@ -176,35 +219,32 @@ class GA:
             if alt_sign: 
                 rdm_chrom *= np.random.choice([-1,1], size_rdm, p=[0.5,0.5])
             pop = np.concatenate((prev.reshape(1, len(prev)), rdm_chrom), axis=0)
-            pop_size = (self.num_chroms, self.num_genes)
-
-        return pop, pop_size
+        
+        pops = pd.DataFrame(pop,columns=col)
+        return pops
 
     def run(self):
         """
-        Running the genetic algorithm. This is the main method in which the genetic algorithm is evolved through a number of generations.
+        Running the genetic algorithm. After the pops are initialized, the fittest individuals are selected,
+        then their genes are mixed and finaly mutated (randomly) to create the new population.
         """
-        # 1) Initialize population (in __init__)
+        # 1) Initialize population (in __init__).
 
         self.best_fitness = []
         self.best_chrom = []
+        
+        # loop over generations
         for generation in range(self.num_generations):
             print('\nGEN:', generation)
 
-            # loop over gene types
-            parents = []
-            offspring_mutation = []
-
-            # 2) Measuring fitness of population.
+            # 2) Measure fitness of population.
             
             fitness = self.evaluate_fitness()
             best_match_idx = np.argmax(fitness)
-            # best_chrom = np.array([])
-            # for j in range(self.gene_groups):
-            #     best_chrom = np.append(best_chrom, self.populations[j][best_match_idx, :])
             best_chrom = self.populations.iloc[best_match_idx]
             max_fitness = fitness[best_match_idx]
             
+            # appending max fitness and chromosome for plotting purposes
             self.best_fitness.append(max_fitness)
             self.best_chrom.append(best_chrom)
 
@@ -214,7 +254,7 @@ class GA:
             except AttributeError:
                 raise NotImplementedError("The sel type was mistyped: Method is not implemented.")
                 
-            parents = sequential_dataframe(self.populations, sel_method, fitness, self.num_genes, self.gene_groups)
+            parents = self.run_fn(self.populations, sel_method, fitness, self.num_genes, self.gene_groups)
 
             # 4) Crossover of each pair of parents
             try:
@@ -222,7 +262,7 @@ class GA:
             except AttributeError:
                 raise NotImplementedError("The cross type was mistyped: Method is not implemented.")
 
-            offspring_crossover = sequential_dataframe(parents, cross_method, self.num_offspring, self.num_genes, self.gene_groups)
+            offspring_crossover = self.run_fn(parents, cross_method, self.num_offspring, self.num_genes, self.gene_groups)
 
             all_offs = []
             idx_ac = 0
@@ -240,25 +280,24 @@ class GA:
                 idx_ac += gen
                 all_offs.append(offspring_mutation)
 
-                # 6) Creating the new population
-
             offspring_mutation = pd.concat(all_offs,axis=1)
+            
+            # 6) Creating the new population
            
             if (self.keep_parents == 0):
+                # keep no parents
                 self.populations = offspring_mutation
 
             elif (self.keep_parents == -1):
-                # Creating the new population based on the parents and offspring.
+                # keep all parents
                 self.population[:parents.shape[0]] = parents
                 self.population[parents.shape[0]:] = offspring_mutation
 
             elif (self.keep_parents > 0):
-                # Creating new population with a given number of parents
+                # keep a given number of parents
                 Sel2 = Selection(self.keep_parents) # new selection 
                 sel_method2 = getattr(Sel2, "steady_state", fitness)
-                parents_to_keep = sequential_dataframe(self.populations, sel_method2, fitness, self.num_genes, self.gene_groups)
-        
-                # parents_to_keep = Sel2.steady_state(fitness, self.populations[g])
+                parents_to_keep = self.run_fn(self.populations, sel_method2, fitness, self.num_genes, self.gene_groups)
                 self.populations.loc[:parents_to_keep.shape[0]-1] = parents_to_keep
                 self.populations.loc[parents_to_keep.shape[0]:] = offspring_mutation.to_numpy()
 
@@ -271,26 +310,19 @@ class GA:
 
         # After the run() method completes, the run_completed flag is changed from False to True.
         self.run_completed = True
+        self.best_fitness.append(max_fitness)
+        self.best_chrom.append(best_chrom)
 
     def evaluate_fitness(self):
         """
         Calculating the fitness values of all solutions in the current population. 
-        It returns:
-            -fitness: An array of the calculated fitness values.
+        
+        Returns
+        -------
+        pop_fitness : numpy array
+            An array of the calculated fitness values.
         """
         pop_fitness = []
-        # pops = []
-        # for i in range(self.num_chroms):
-        #     all_chroms = np.array([])
-        #     for j in range(self.gene_groups):
-        #         all_chroms = np.append(all_chroms, self.populations[j][i])
-        #     pops.append(all_chroms)
-        # pops = np.array(pops)
-        # Calculating the fitness value of each solution in the current population.
-        # for sol in pops:
-        # for index, sol in self.populations.iterrows():
-        #     fitness = self.fitness_func(sol)
-        #     pop_fitness.append(fitness)
         
         df_fit = self.populations.apply(self.fitness_func, axis=1)
 
@@ -301,17 +333,26 @@ class GA:
         return pop_fitness
 
     def evaluate_convergence(self):
+        """
+        Evaluates if the fitness have converged
 
+        """
         current_fitness = np.max(self.evaluate_fitness())
         if abs(current_fitness - self.best_fitness[-1]) < 1e-5:
             self.conv = True
 
     def get_result(self):
+        
         """
-        Calculates the fitness values for the current population. 
-        If the run() method is not called, then it returns 2 empty lists. Otherwise, it returns the following:
-            -best_solution: Best solution in the current population.
-            -best_solution_fitness: Fitness value of the best solution.
+        To extract the best population & fitness
+
+        Returns
+        -------
+        best_chrom : numpy array
+            Best solution in the current population.
+        best_fitness : float
+            Fitness of the best solution.
+
         """
         if self.run_completed == False:
             raise ValueError("\nThe result has yet to be produced!\n")
@@ -321,8 +362,6 @@ class GA:
         # Then return the index of that solution corresponding to the best fitness.
         best_match_idx = np.argmax(fitness)
         best_chrom = self.populations.iloc[best_match_idx].to_numpy()
-        # for j in range(self.gene_groups):
-        #     best_chrom = np.append(best_chrom, self.populations[j][best_match_idx, :])
 
         best_fitness = fitness[best_match_idx]
         self.best_solution = best_chrom
@@ -330,21 +369,16 @@ class GA:
         return best_chrom, best_fitness
 
     def plot_result(self, param_idx=0):
-        '''
-        Creating 2 plots that summarizes how the solutions evolved.
-        The first between the it number and the function output based on the current parameters for the best solution.
+        """
+        Creating 2 plots that summarize how the solutions evolved.
+        The first between the iteration number and the function output based on the current parameters for the best solution.
         The second is between the it and the fitness value of the best solution.
         Parameters
         ----------
-        param_idx : TYPE, optional
-            DESCRIPTION. The default is 0.
-
-
-        Returns
-        -------
-        None.
-
-        '''
+        param_idx : int, optional
+            The index of the gene to plot.
+            
+        """
 
         import matplotlib.pyplot as plt
 
@@ -362,49 +396,35 @@ class GA:
         plt.ylabel("Fitness")
         plt.show()
 
-    def save(self, path):
-        '''
-        Saving the genetic algorithm instance
+    def save(self):
+        """
+        Saving the genetic algorithm instance.
+        """
+        f = open(self.filename, 'wb')
+        pickle.dump(self, f)
 
-        Parameters
-        ----------
-        filename : str
-            Name of the file w/o extension
+    
+    def load(self, path=None):
+        """
+        Read a previously saved genetic algorithm instance. 
 
         Returns
         -------
-        None.
-
-        '''
-        with open(path + "ga.pkl", 'wb') as file:
-            pickle.dump(self, file)
-
-    
-    def load(path):
-        '''
-        Reading a saved instance of the genetic algorithm    
-        
-        Parameters
-        ----------
-        path : str
-            path of file.
-    
-        Returns
-        -------
-        ga_saved : GA
+        ga_saved : GA class
            GA instance.
     
-        '''
-    
+        """
+        filename = path if path is not None else self.filename
+        
         try:
-            with open(path + "ga.pkl", 'rb') as file:
-                ga_saved = pickle.load(file)
+            f = open(filename, 'rb') 
+            ga_saved = pickle.load(f)
         except (FileNotFoundError):
             print("File doesn't exist")
         return ga_saved
-    
+        
 def parallelize_dataframe(df, func, second, num_genes, gene_groups):
-    '''
+    """
     When the number of gene groups is small, this function will parallelize the 
     run for each group insteaad of looping through each.
 
@@ -420,7 +440,7 @@ def parallelize_dataframe(df, func, second, num_genes, gene_groups):
     df : TYPE
         DESCRIPTION.
 
-    '''
+    """
     from multiprocessing import  Pool
     from functools import partial
     from itertools import repeat
@@ -438,23 +458,23 @@ def parallelize_dataframe(df, func, second, num_genes, gene_groups):
     return df
 
 def sequential_dataframe(df, func, second, num_genes, gene_groups):
-    '''
+    """
     When the number of gene groups is small, this function will 
     run each group by looping through each.
 
     Parameters
     ----------
-    df : TYPE
-        DESCRIPTION.
-    func : TYPE
-        DESCRIPTION.
+    df : Pandas DF
+    func : function to apply to df. 
+    second : Additional argument to func
+    num_genes : Number of genes.
+    gene_groups : Number of gene types to loop through
 
     Returns
     -------
-    df : TYPE
-        DESCRIPTION.
+    df : New dataframe
 
-    '''
+    """
 
     sp_pattern = np.add.accumulate(num_genes)
     seq  = np.append(0,sp_pattern)
@@ -484,11 +504,17 @@ class Selection:
         self.tournament_sel = tournament_sel
 
     def roulette_wheel(self, population, fitness):
-        """ Roulette wheel or Fitness proportionate selection
-        Parameters:
-            - fitness: NumPy array of fitness function for all the individuals in the chromosome/chromosome group
-            - population: Numpy array with population entries
-        Returns: NumPy array with selected parents
+        """ 
+        Roulette wheel or Fitness proportionate selection
+        Parameters
+        ----------
+        fitness: NumPy array of fitness function for all the individuals in the chromosome/chromosome group
+        population: Numpy array with population entries
+        
+        Returns
+        -------
+        NumPy array with selected parents
+        
         """
         population = population.T
         fit_sum = np.sum(fitness) + 0.000000001
@@ -512,12 +538,18 @@ class Selection:
         return pd.DataFrame(parents)
 
     def stochastic(self, population, fitness):
-        """ Implements Stochastic Universal Sampling:
+        """ 
+        Implements Stochastic Universal Sampling:
             SUS uses a single random value to sample all of the solutions by choosing them at evenly spaced intervals.
-         Parameters:
-            - fitness: NumPy array of fitness function for all the genes in the chromosome/chromosome group
-            - population: Numpy array with population entries
-        Returns: NumPy array with selected parents
+        Parameters
+        ----------
+        fitness: NumPy array of fitness function for all the genes in the chromosome/chromosome group
+        population: Numpy array with population entries
+        
+        Returns
+        -------
+        NumPy array with selected parents
+        
         """
         population = population.T
     
@@ -547,18 +579,20 @@ class Selection:
 
 
     def truncation(self):
-        ''' Implementation pending
+        """ Implementation pending
 
-        '''
+        """
         return None
 
     def tournament(self, population, fitness):
-        """ Implements the Tournament Selection algorithm:
+        """ 
+        Implements the Tournament Selection algorithm:
             Random groups are sampled from the population and a winner is selected each time
         Parameters
         ----------
-            - fitness: NumPy array of fitness function for all the genes in the chromosome/chromosome group
-            - population: Numpy array with population entries
+        fitness: NumPy array of fitness function for all the genes in the chromosome/chromosome group
+        population: Numpy array with population entries
+        
         Returns
         -------
         NumPy array with selected parents
@@ -578,11 +612,12 @@ class Selection:
 
 
     def steady_state(self, population, fitness):
-        """ Implements the steady state selection algorithm
+        """ 
+        Implements the steady state selection algorithm
         Parameters
         ----------
-            - fitness: NumPy array of fitness function for all the genes in the chromosome/chromosome group
-            - population: Numpy array with population entries
+        fitness: NumPy array of fitness function for all the genes in the chromosome/chromosome group
+        population: Numpy array with population entries
         Returns
         -------
         NumPy array with selected parents
@@ -749,7 +784,7 @@ class Mutation:
         return offspring
 
     def swap(self, offspring):
-        '''Implements a swap mutation by selecting two genes at random, and interchanging the values
+        """Implements a swap mutation by selecting two genes at random, and interchanging the values
         
         Parameters
         ----------
@@ -760,7 +795,7 @@ class Mutation:
         -------
         NumPy array with the offspring after mutation.
 
-        '''
+        """
         ngenes = offspring.shape[1]
         noffsp = offspring.shape[0]
 
